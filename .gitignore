@@ -1,0 +1,15 @@
+
+.venv/
+venv/
+
+
+.env
+
+
+data/bot_database.db
+data/*.session
+data/*.session-journal
+
+.idea/
+__pycache__/
+*.pyc

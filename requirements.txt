@@ -1,0 +1,6 @@
+telethon
+streamlit
+pandas
+scikit-learn
+nltk
+python-dotenv
