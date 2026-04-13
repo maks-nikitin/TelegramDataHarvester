@@ -10,5 +10,5 @@ async def main():
     for m in messages:
         print(f"- {m['text'][:50]}...")
 
-if __name__ == "main":
+if __name__ == "__main__":
     asyncio.run(main())
