@@ -8,7 +8,7 @@ from nltk.corpus import stopwords
 # Скачиваем русские стоп-слова (делается один раз)
 try:
     nltk.data.find('corpora/stopwords')
-except LookUpError:
+except LookupError:
     nltk.download('stopwords')
 
 stop_words = stopwords.words('russian')
