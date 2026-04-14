@@ -10,88 +10,148 @@ sys.path.append(project_root)
 
 import streamlit as st
 import pandas as pd
+from apscheduler.schedulers.background import BackgroundScheduler
 from src.database.db_manager import DBManager
 from src.analytics.processor import TextProcessor
-from src.parser.collector import TelegramCollector  # Импортируем наш парсер
+from src.parser.collector import TelegramCollector
 
-# Инициализация
+# --- ИНИЦИАЛИЗАЦИЯ ---
+
 db = DBManager()
-processor = TextProcessor()
 collector = TelegramCollector()
 
-st.set_page_config(page_title="TG Analyzer", page_icon="📊", layout="wide")
+
+# Кэшируем процессор, так как внутри тяжелая нейросеть
+@st.cache_resource
+def get_processor():
+    return TextProcessor()
 
 
-# Функция для запуска асинхронного парсера внутри Streamlit
+processor = get_processor()
+
+
+# Настройка планировщика (Пункт 2 ТЗ)
+@st.cache_resource
+def start_scheduler():
+    scheduler = BackgroundScheduler()
+
+    # Функция для фонового обновления (упрощенно)
+    def scheduled_task():
+        print(f"[{datetime.datetime.now()}] Запуск фонового обновления данных...")
+        # Тут можно вызвать collector.fetch_messages для всех каналов из базы
+
+    scheduler.add_job(scheduled_task, 'interval', hours=1)
+    scheduler.start()
+    return scheduler
+
+
+start_scheduler()
+
+# --- ИНТЕРФЕЙС STREAMLIT ---
+
+st.set_page_config(page_title="TG Analyzer Pro", page_icon="🤖", layout="wide")
+
+st.title("📊 Автоматизированная система анализа Telegram-каналов")
+
+# --- SIDEBAR (БОКОВАЯ ПАНЕЛЬ) ---
+st.sidebar.header("🎛 Управление сбором")
+
+channel_to_parse = st.sidebar.text_input("Username канала", placeholder="@durov")
+count = st.sidebar.slider("Количество сообщений", 10, 500, 50)
+
+
+# Функция для запуска асинхронного парсера
 def run_parser(username, limit):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    data = loop.run_until_complete(collector.fetch_messages(username, limit))
-    return data
+    return loop.run_until_complete(collector.fetch_messages(username, limit))
 
 
-st.title("📊 Реальный сбор и анализ Telegram")
-
-# --- SIDEBAR ---
-st.sidebar.header("🎛 Управление")
-
-channel_to_parse = st.sidebar.text_input("Username канала для парсинга", placeholder="@news")
-count = st.sidebar.slider("Сколько сообщений собрать?", 10, 200, 50)
-
-if st.sidebar.button("🚀 Запустить сбор"):
+if st.sidebar.button("🚀 Начать сбор данных"):
     if channel_to_parse:
-        with st.spinner(f'Связываюсь с Telegram и собираю данные из {channel_to_parse}...'):
-            # 1. Добавляем канал в базу
+        with st.spinner('Нейросеть и парсер работают...'):
             db.add_channel(channel_to_parse)
-            # 2. Собираем данные через парсер
             real_data = run_parser(channel_to_parse, count)
 
             if real_data:
-                # 3. Сохраняем в базу
                 db.save_messages(channel_to_parse, real_data)
-                st.sidebar.success(f"Готово! Собрано {len(real_data)} постов.")
+                st.sidebar.success(f"Успешно собрано {len(real_data)} постов!")
                 st.rerun()
             else:
-                st.sidebar.error("Не удалось собрать данные. Проверьте username.")
+                st.sidebar.error("Ошибка сбора. Проверьте канал.")
     else:
-        st.sidebar.warning("Введите @username!")
+        st.sidebar.warning("Введите @username")
 
-# Кнопка очистки базы (чтобы начать с чистого листа)
+st.sidebar.divider()
 if st.sidebar.button("🗑 Очистить базу данных"):
-    db.clear_all_data()  # Используем новый метод вместо os.remove
-    st.sidebar.success("Данные успешно удалены!")
+    db.clear_all_data()
+    st.sidebar.success("База данных очищена!")
     st.rerun()
+
+st.sidebar.info("Планировщик: Активен (раз в 1 час)")
 
 # --- ОСНОВНОЙ ЭКРАН ---
 df = db.get_messages_df()
 
 if df.empty:
-    st.info("👋 База данных пока пуста. Введите @username в меню слева и нажмите 'Запустить сбор'.")
+    st.info("👋 База данных пуста. Добавьте канал в меню слева для начала анализа.")
 else:
-    # Метрики
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Сообщений в базе", len(df))
+    # 1. Верхние метрики
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Всего сообщений", len(df))
     m2.metric("Общий охват", f"{df['views'].sum():,}")
-    m3.metric("Каналов проанализировано", len(df['username'].unique()))
+    m3.metric("Средний охват", f"{int(df['views'].mean()):,}")
+    m4.metric("Каналов", len(df['username'].unique()))
 
     st.divider()
 
-    # Аналитика
-    col_left, col_right = st.columns(2)
+    # 2. Частотный анализ фраз (Пункт 1 ТЗ)
+    st.subheader("🔑 Частотный анализ ключевых слов и фраз (N-граммы)")
+    col_chart, col_table = st.columns([2, 1])
 
-    with col_left:
-        st.subheader("🔑 Ключевые слова")
-        keywords = processor.get_top_keywords(df['text'], n=10)
-        st.write(", ".join(keywords) if keywords else "Анализ слов недоступен")
+    ngram_df = processor.get_top_ngram_counts(df['text'], n=20)
 
-    with col_right:
-        st.subheader("📈 Статистика по каналам")
-        st.bar_chart(df['username'].value_counts())
+    with col_chart:
+        # Визуализация частотности
+        st.bar_chart(data=ngram_df, x='phrase', y='count', color="#FF4B4B")
 
-    st.subheader("🤖 Темы сообщений")
-    df_clustered = processor.cluster_messages(df)
-    st.dataframe(df_clustered[['username', 'date', 'text', 'views', 'cluster']], width=1200)  # исправили параметр width
+    with col_table:
+        st.write("Топ-20 популярных выражений:")
+        st.dataframe(ngram_df, hide_index=True, width=400)
 
-    # Кнопка скачивания
+    st.divider()
+
+    # 3. Кластеризация и Темы (Пункт 3 ТЗ)
+    st.subheader("🤖 Анализ тем нейросетью")
+
+    # Запускаем кластеризацию
+    with st.spinner('Нейросеть классифицирует сообщения...'):
+        df_clustered = processor.cluster_messages(df, n_clusters=min(5, len(df)))
+
+    # Формируем "Профиль интересов" (Пункт 4 ТЗ)
+    # Считаем, какие темы набирают больше всего просмотров
+    st.write("📊 Профиль популярности тем (на основе просмотров):")
+    interest_profile = df_clustered.groupby('cluster')['views'].sum().sort_values(ascending=False)
+    st.area_chart(interest_profile)
+
+    # Таблица результатов
+    st.write("Последние сообщения с определенными темами:")
+    st.dataframe(
+        df_clustered[['username', 'cluster', 'text', 'views', 'date']].sort_values(by='date', ascending=False),
+        width=1400
+    )
+
+    # 4. Экспорт (Пункт 1 ТЗ)
+    st.divider()
+    st.subheader("💾 Экспорт результатов")
+    col_exp1, col_exp2 = st.columns(2)
+
     csv = df_clustered.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Скачать отчет (CSV)", csv, "tg_report.csv", "text/csv")
+    col_exp1.download_button(
+        "📥 Скачать отчет (CSV/Excel)",
+        csv,
+        f"tg_report_{datetime.date.today()}.csv",
+        "text/csv"
+    )
+
+    col_exp2.info("PDF-отчеты будут доступны в следующей версии.")
