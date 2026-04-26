@@ -1,5 +1,4 @@
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
-from sklearn.cluster import KMeans
+from sklearn.feature_extraction.text import CountVectorizer
 import pandas as pd
 import re
 import nltk
@@ -7,90 +6,108 @@ from nltk.corpus import stopwords
 import torch
 from transformers import pipeline
 
-# Загрузка стоп-слов
 try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
+    nltk.download('stopwords', quiet=True)
+except:
+    pass
 
 stop_words = stopwords.words('russian')
 
 
 class TextProcessor:
     def __init__(self):
-        # 1. Инициализация нейросети для определения тем (Пункт 3 ТЗ)
-        # Модель mDeBERTa хорошо понимает русский язык
-        print("Загрузка нейросети для анализа тем (может занять время)...")
+        print("Загрузка нейросети для анализа тем...")
         device = 0 if torch.cuda.is_available() else -1
-        self.classifier = pipeline(
-            "zero-shot-classification",
-            model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
-            device=device
-        )
-        # Список категорий, которые нейросеть будет присваивать темам
-        self.labels = ["политика", "экономика", "криптовалюты", "технологии", "развлечения", "спорт", "здоровье",
-                       "образование", "казино и скам"]
+        try:
+            self.classifier = pipeline(
+                "zero-shot-classification",
+                model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
+                device=device
+            )
+        except Exception as e:
+            print(f"Ошибка ИИ: {e}")
+            self.classifier = None
+
+        # Улучшенный список категорий для нейронки
+        self.labels = [
+            "политика", "экономика", "криптовалюты", "технологии",
+            "развлечения", "спорт", "здоровье", "образование",
+            "происшествия", "погода", "культура", "общество"
+        ]
+
+        # ГИПЕР-РАСШИРЕННЫЙ ФИЛЬТР (Для моментальной и точной работы)
+        self.fast_rules = {
+            "ПОГОДА": ["погода", "прогноз", "температура", "градус", "дождь", "осадки", "солнечно", "ветер", "синоптик",
+                       "белгидромет"],
+            "СПОРТ": ["бодибилдинг", "фитнес", "атлет", "матч", "футбол", "хоккей", "турнир", "чемпион", "олимпиада",
+                      "тренировка"],
+            "ПОЛИТИКА": ["лукашенко", "президент", "закон", "указ", "депутат", "правительство", "совет республики",
+                         "выборы"],
+            "ЭКОНОМИКА": ["инфляция", "бюджет", "налог", "финансы", "ввп", "предприятие", "производство", "экспорт",
+                          "импорт"],
+            "ПРОИСШЕСТВИЯ": ["мвд", "гаи", "ск", "суд", "задержан", "дтп", "авария", "криминал", "милиция", "пожар",
+                             "мчс"],
+            "ОБЩЕСТВО": ["пенсия", "пособие", "жилье", "строительство", "жкх", "тарифы", "льготы", "социальный"],
+            "ЗДОРОВЬЕ": ["врач", "медицина", "больница", "аптека", "вирус", "вакцина", "заболевание", "лечение"],
+            "КУЛЬТУРА": ["выставка", "музей", "театр", "фестиваль", "концерт", "археолог", "находка", "памятник"],
+            "КРИПТОВАЛЮТЫ": ["биткоин", "крипта", "майнинг", "токен", "blockchain", "криптовалют"]
+        }
 
     @staticmethod
     def clean_text(text):
-        if not text or not isinstance(text, str):
-            return ""
+        if not text or not isinstance(text, str): return ""
+        # 1. Отрезаем ссылки и соцсети в конце поста (обычно они начинаются с [Inst] или http)
+        text = re.split(r'❤️|\[Inst\]|\[TikTok\]|http', text)[0]
         text = text.lower()
-        text = re.sub(r'https?://\S+|www\.\S+', '', text)
-        text = re.sub(r'[^а-яёa-z\s]', '', text)
-        text = " ".join(text.split())
-        return text
+        text = re.sub(r'[^а-яёa-z\s]', ' ', text)
+        return " ".join(text.split())
 
-    def get_top_ngram_counts(self, texts, n=10, ngram_range=(1, 2)):
-        """Подсчет частоты употребления слов и фраз (Пункт 1 ТЗ)"""
-        if texts is None or len(texts) == 0:
-            return pd.DataFrame(columns=['phrase', 'count'])
+    def get_top_ngram_counts(self, texts, n=15):
+        if texts is None or len(texts) == 0: return pd.DataFrame()
+        try:
+            cleaned_texts = texts.apply(self.clean_text)
+            cleaned_texts = cleaned_texts[cleaned_texts.str.strip() != ""]
+            if cleaned_texts.empty: return pd.DataFrame()
+            vectorizer = CountVectorizer(stop_words=stop_words, ngram_range=(1, 2), max_features=n)
+            X = vectorizer.fit_transform(cleaned_texts)
+            df_counts = pd.DataFrame({'phrase': vectorizer.get_feature_names_out(), 'count': X.sum(axis=0).A1})
+            return df_counts.sort_values(by='count', ascending=False)
+        except:
+            return pd.DataFrame()
 
-        cleaned_texts = texts.apply(self.clean_text)
-        cleaned_texts = cleaned_texts[cleaned_texts.str.strip() != ""]
+    def _fast_categorize(self, text):
+        text_lower = text.lower()
+        for theme, words in self.fast_rules.items():
+            if any(word in text_lower for word in words):
+                return theme
+        return None
 
-        if cleaned_texts.empty:
-            return pd.DataFrame(columns=['phrase', 'count'])
+    def cluster_messages(self, df):
+        if df is None or df.empty: return df
+        df_result = df.copy()
+        df_result['cluster'] = "ОБЩЕЕ"
 
-        # Используем CountVectorizer для простого подсчета частоты
-        vectorizer = CountVectorizer(stop_words=stop_words, ngram_range=ngram_range, max_features=n)
-        X = vectorizer.fit_transform(cleaned_texts)
+        for index, row in df_result.iterrows():
+            raw_text = row.get('text', '')
+            # Чистим текст ТОЛЬКО для анализа
+            cleaned = self.clean_text(raw_text)
 
-        # Суммируем появления каждого слова
-        words = vectorizer.get_feature_names_out()
-        counts = X.sum(axis=0).A1
+            if len(cleaned) < 10:
+                continue
 
-        df_counts = pd.DataFrame({'phrase': words, 'count': counts})
-        return df_counts.sort_values(by='count', ascending=False)
+            # 1. Быстрый фильтр (теперь с погодой и обществом)
+            theme = self._fast_categorize(cleaned)
 
-    def cluster_messages(self, df, n_clusters=3):
-        """Кластеризация и автоматическое именование тем нейросетью"""
-        if df is None or len(df) < n_clusters or len(df) < 2:
-            return df
+            # 2. Нейросеть для остального
+            if not theme and self.classifier:
+                try:
+                    # Подаем почищенный текст без ссылок
+                    res = self.classifier(cleaned[:250], self.labels, multi_label=False)
+                    theme = res['labels'][0].upper()
+                except:
+                    theme = "НОВОСТИ"
+            elif not theme:
+                theme = "НОВОСТИ"
 
-        # Сначала делаем математическую кластеризацию (K-Means)
-        vectorizer = TfidfVectorizer(stop_words=stop_words, ngram_range=(1, 2))
-        cleaned_texts = df['text'].apply(self.clean_text)
-        X = vectorizer.fit_transform(cleaned_texts)
-
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        df['cluster_id'] = kmeans.fit_predict(X)
-
-        # Теперь для каждого кластера просим нейросеть придумать название
-        cluster_names = {}
-        for i in range(n_clusters):
-            # Берем тексты, попавшие в этот кластер
-            cluster_texts = df[df['cluster_id'] == i]['text'].tolist()
-            if cluster_texts:
-                # Берем кусочек текста для нейросети (чтобы работало быстрее)
-                sample_text = " ".join(cluster_texts[:3])[:400]
-
-                # Нейросеть выбирает лучшую категорию из self.labels
-                res = self.classifier(sample_text, self.labels, multi_label=False)
-                cluster_names[i] = res['labels'][0].upper()
-            else:
-                cluster_names[i] = f"ТЕМА {i + 1}"
-
-        # Заменяем ID кластеров на красивые названия
-        df['cluster'] = df['cluster_id'].map(cluster_names)
-        return df
+            df_result.at[index, 'cluster'] = theme
+        return df_result

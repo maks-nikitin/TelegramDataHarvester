@@ -2,26 +2,25 @@ import sys
 import os
 import datetime
 import asyncio
+import streamlit as st
+import pandas as pd
 
 # Исправление путей
 current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(current_dir))
-sys.path.append(project_root)
+src_dir = os.path.dirname(current_dir)
+project_root = os.path.dirname(src_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-import streamlit as st
-import pandas as pd
-from apscheduler.schedulers.background import BackgroundScheduler
 from src.database.db_manager import DBManager
 from src.analytics.processor import TextProcessor
 from src.parser.collector import TelegramCollector
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
-
+# Инициализация
 db = DBManager()
 collector = TelegramCollector()
 
 
-# Кэшируем процессор, так как внутри тяжелая нейросеть
 @st.cache_resource
 def get_processor():
     return TextProcessor()
@@ -29,129 +28,94 @@ def get_processor():
 
 processor = get_processor()
 
-
-# Настройка планировщика (Пункт 2 ТЗ)
-@st.cache_resource
-def start_scheduler():
-    scheduler = BackgroundScheduler()
-
-    # Функция для фонового обновления (упрощенно)
-    def scheduled_task():
-        print(f"[{datetime.datetime.now()}] Запуск фонового обновления данных...")
-        # Тут можно вызвать collector.fetch_messages для всех каналов из базы
-
-    scheduler.add_job(scheduled_task, 'interval', hours=1)
-    scheduler.start()
-    return scheduler
-
-
-start_scheduler()
-
-# --- ИНТЕРФЕЙС STREAMLIT ---
-
+# Настройка страницы
 st.set_page_config(page_title="TG Analyzer Pro", page_icon="🤖", layout="wide")
+st.title(" Автоматизация анализа Telegram-каналов")
 
-st.title("📊 Автоматизированная система анализа Telegram-каналов")
-
-# --- SIDEBAR (БОКОВАЯ ПАНЕЛЬ) ---
-st.sidebar.header("🎛 Управление сбором")
-
-channel_to_parse = st.sidebar.text_input("Username канала", placeholder="@durov")
-count = st.sidebar.slider("Количество сообщений", 10, 500, 50)
+# SideBar
+st.sidebar.header("🎛 Сбор данных")
+new_ch = st.sidebar.text_input("Введите @username", placeholder="@durov")
+msg_count = st.sidebar.slider("Сколько сообщений?", 10, 500, 10)
 
 
-# Функция для запуска асинхронного парсера
-def run_parser(username, limit):
+def run_parser_sync(username, limit):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    return loop.run_until_complete(collector.fetch_messages(username, limit))
+    try:
+        return loop.run_until_complete(collector.fetch_messages(username, limit))
+    finally:
+        loop.close()
 
 
-if st.sidebar.button("🚀 Начать сбор данных"):
-    if channel_to_parse:
-        with st.spinner('Нейросеть и парсер работают...'):
-            db.add_channel(channel_to_parse)
-            real_data = run_parser(channel_to_parse, count)
+if st.sidebar.button(" Собрать / Обновить"):
+    if new_ch:
+        with st.spinner('Парсинг и работа ИИ...'):
+            db.add_channel(new_ch)
+            raw_data = run_parser_sync(new_ch, msg_count)
+            if raw_data:
+                existing_ids = db.get_existing_msg_ids(new_ch)
+                new_messages = [m for m in raw_data if m.get('tg_msg_id') not in existing_ids]
 
-            if real_data:
-                db.save_messages(channel_to_parse, real_data)
-                st.sidebar.success(f"Успешно собрано {len(real_data)} постов!")
+                if new_messages:
+                    df_new = pd.DataFrame(new_messages)
+                    df_new = processor.cluster_messages(df_new)
+                    df_new['date'] = df_new['date'].astype(str)
+                    db.save_messages(new_ch, df_new.to_dict('records'))
+                    st.sidebar.success(f"Добавлено {len(new_messages)} постов!")
+                else:
+                    st.sidebar.success("Новых постов нет.")
                 st.rerun()
-            else:
-                st.sidebar.error("Ошибка сбора. Проверьте канал.")
     else:
-        st.sidebar.warning("Введите @username")
+        st.sidebar.warning("Введите юзернейм!")
 
-st.sidebar.divider()
-if st.sidebar.button("🗑 Очистить базу данных"):
+if st.sidebar.button("🗑 Очистить всю базу"):
     db.clear_all_data()
-    st.sidebar.success("База данных очищена!")
     st.rerun()
 
-st.sidebar.info("Планировщик: Активен (раз в 1 час)")
+# --- ГЛАВНЫЙ ЭКРАН ---
+df_all = db.get_messages_df()
 
-# --- ОСНОВНОЙ ЭКРАН ---
-df = db.get_messages_df()
-
-if df.empty:
-    st.info("👋 База данных пуста. Добавьте канал в меню слева для начала анализа.")
+if df_all.empty:
+    st.info(" Добавьте первый канал слева.")
 else:
-    # 1. Верхние метрики
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Всего сообщений", len(df))
-    m2.metric("Общий охват", f"{df['views'].sum():,}")
-    m3.metric("Средний охват", f"{int(df['views'].mean()):,}")
-    m4.metric("Каналов", len(df['username'].unique()))
+    ch_list = sorted(df_all['username'].unique())
+    selected_page = st.selectbox(" Выберите канал:", ["ОБЩАЯ СТАТИСТИКА"] + list(ch_list))
+
+    df = df_all if selected_page == "ОБЩАЯ СТАТИСТИКА" else df_all[df_all['username'] == selected_page]
+
+    # Кнопка скачивания CSV вверху справа
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(" Скачать текущие данные (CSV)", csv, f"report_{selected_page}.csv", "text/csv")
+
+    # Метрики
+    m = st.columns(4)
+    m[0].metric("Постов", len(df))
+    m[1].metric("Просмотров", f"{df['views'].sum():,}")
+    m[2].metric("Реакций", f"{df['reactions'].sum():,}")
+    m[3].metric("Пересылок", f"{df['forwards'].sum():,}")
 
     st.divider()
 
-    # 2. Частотный анализ фраз (Пункт 1 ТЗ)
-    st.subheader("🔑 Частотный анализ ключевых слов и фраз (N-граммы)")
-    col_chart, col_table = st.columns([2, 1])
-
-    ngram_df = processor.get_top_ngram_counts(df['text'], n=20)
-
-    with col_chart:
-        # Визуализация частотности
-        st.bar_chart(data=ngram_df, x='phrase', y='count', color="#FF4B4B")
-
-    with col_table:
-        st.write("Топ-20 популярных выражений:")
-        st.dataframe(ngram_df, hide_index=True, width=400)
+    # N-граммы
+    st.subheader(" Популярные выражения")
+    ng_df = processor.get_top_ngram_counts(df['text'])
+    if not ng_df.empty:
+        st.bar_chart(ng_df, x='phrase', y='count', color="#FF4B4B")
 
     st.divider()
 
-    # 3. Кластеризация и Темы (Пункт 3 ТЗ)
-    st.subheader("🤖 Анализ тем нейросетью")
+    # Кластеры
+    st.subheader(" Тематический анализ (ИИ)")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.write(" Темы канала:")
+        st.bar_chart(df['cluster'].value_counts())
+    with c2:
+        st.write("Последние классифицированные сообщения:")
+        st.dataframe(
+            df[['cluster', 'text', 'views', 'reactions', 'date']].sort_values(by='date', ascending=False).head(20),
+            hide_index=True, use_container_width=True
+        )
 
-    # Запускаем кластеризацию
-    with st.spinner('Нейросеть классифицирует сообщения...'):
-        df_clustered = processor.cluster_messages(df, n_clusters=min(5, len(df)))
-
-    # Формируем "Профиль интересов" (Пункт 4 ТЗ)
-    # Считаем, какие темы набирают больше всего просмотров
-    st.write("📊 Профиль популярности тем (на основе просмотров):")
-    interest_profile = df_clustered.groupby('cluster')['views'].sum().sort_values(ascending=False)
-    st.area_chart(interest_profile)
-
-    # Таблица результатов
-    st.write("Последние сообщения с определенными темами:")
-    st.dataframe(
-        df_clustered[['username', 'cluster', 'text', 'views', 'date']].sort_values(by='date', ascending=False),
-        width=1400
-    )
-
-    # 4. Экспорт (Пункт 1 ТЗ)
-    st.divider()
-    st.subheader("💾 Экспорт результатов")
-    col_exp1, col_exp2 = st.columns(2)
-
-    csv = df_clustered.to_csv(index=False).encode('utf-8')
-    col_exp1.download_button(
-        "📥 Скачать отчет (CSV/Excel)",
-        csv,
-        f"tg_report_{datetime.date.today()}.csv",
-        "text/csv"
-    )
-
-    col_exp2.info("PDF-отчеты будут доступны в следующей версии.")
+    with st.expander(" Таблица всех данных"):
+        st.dataframe(df.sort_values(by='date', ascending=False), use_container_width=True)
