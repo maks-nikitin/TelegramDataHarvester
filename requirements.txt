@@ -1,6 +1,11 @@
 telethon
 streamlit
+streamlit-autorefresh
 pandas
 scikit-learn
 nltk
+torch
+torchvision
+transformers
 python-dotenv
+apscheduler
