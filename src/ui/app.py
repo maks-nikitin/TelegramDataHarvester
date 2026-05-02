@@ -4,18 +4,18 @@ import datetime
 import asyncio
 import streamlit as st
 import pandas as pd
-from streamlit_autorefresh import st_autorefresh
+import plotly.express as px
 
-# --- ИСПРАВЛЕНИЕ ПУТЕЙ ---
+# Фикс путей
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+sys.path.append(project_root)
 
 from src.database.db_manager import DBManager
 from src.analytics.processor import TextProcessor
 from src.parser.collector import TelegramCollector
 
+# Инициализация
 db = DBManager()
 collector = TelegramCollector()
 
@@ -27,98 +27,127 @@ def get_processor():
 
 processor = get_processor()
 
+# Настройки UI
+st.set_page_config(page_title="TG Intellect Monitor", page_icon="🧠", layout="wide")
 
-# Функция синхронизации с учетом даты
+st.markdown("""
+    <style>
+    .post-card {
+        padding: 20px;
+        border-radius: 12px;
+        margin-bottom: 15px;
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        background: rgba(128, 128, 128, 0.03);
+    }
+    .badge {
+        padding: 4px 12px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        color: white;
+    }
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
+
+
 def sync_data(username, start_date):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        # Собираем данные за период
-        raw_data = loop.run_until_complete(collector.fetch_messages(username, start_date=start_date, limit=200))
-        if raw_data:
-            existing_ids = db.get_existing_msg_ids(username)
-            new_messages = [m for m in raw_data if m.get('tg_msg_id') not in existing_ids]
-
-            if new_messages:
-                df_new = pd.DataFrame(new_messages)
+        raw = loop.run_until_complete(collector.fetch_messages(username, start_date=start_date, limit=100))
+        if raw:
+            ids = db.get_existing_msg_ids(username)
+            new_msgs = [m for m in raw if m.get('tg_msg_id') not in ids]
+            if new_msgs:
+                df_new = pd.DataFrame(new_msgs)
                 df_new = processor.cluster_messages(df_new)
                 df_new['date'] = df_new['date'].astype(str)
                 db.save_messages(username, df_new.to_dict('records'))
-                return len(new_messages)
+                return len(new_msgs)
         return 0
     finally:
         loop.close()
 
 
-# --- ИНТЕРФЕЙС ---
-st.set_page_config(page_title="TG Analyzer Pro", layout="wide")
-st_autorefresh(interval=120000, key="auto")  # Каждые 2 минуты для "автоматизма"
-
-# Дизайн
-st.markdown("""
-    <style>
-    .stApp { background-color: #0F1116; }
-    [data-testid="metric-container"] { background-color: #161A23; border: 1px solid #2D323E; padding: 10px; border-radius: 8px; }
-    </style>
-""", unsafe_allow_html=True)
-
+# SIDEBAR
 with st.sidebar:
-    st.title("📡 Сбор метрик")
-    target = st.text_input("Username канала/группы", placeholder="grodnonewsby")
+    st.title("🧠 Intellect UI")
+    target = st.text_input("Источник (@username)", placeholder="news_channel")
+    date_val = st.date_input("Начало периода", datetime.date.today() - datetime.timedelta(days=3))
 
-    # ТРЕБОВАНИЕ ТЗ: Выбранный период
-    st.subheader("Выбор периода")
-    lookback_date = st.date_input("Собрать данные начиная с:", datetime.date.today() - datetime.timedelta(days=7))
-
-    if st.button("🚀 Запустить сбор"):
+    if st.button("🚀 Синхронизировать"):
         if target:
-            # Очистка юзернейма
             target = target.split('/')[-1].replace('@', '')
-            with st.spinner('Автоматический сбор и анализ...'):
+            with st.spinner('Интеллектуальная обработка...'):
                 db.add_channel(target)
-                added = sync_data(target, lookback_date)
-                st.success(f"Завершено. Новых сообщений: {added}")
+                count = sync_data(target, date_val)
+                st.success(f"Добавлено постов: {count}")
                 st.rerun()
 
-# --- ОСНОВНОЙ ЭКРАН ---
+    st.markdown("---")
+    if st.button("🗑 Очистить базу"):
+        db.clear_all_data()
+        st.rerun()
+
+# MAIN
 df_all = db.get_messages_df()
 
 if df_all.empty:
-    st.info("👋 Система готова. Введите данные канала и период в левой панели.")
+    st.info("👋 Система готова. Добавьте объект мониторинга в левой панели.")
 else:
-    channels = sorted(df_all['username'].unique())
-    selected = st.selectbox("📂 Объект анализа:", ["ВСЕ КАНАЛЫ"] + list(channels))
+    ch_list = sorted(df_all['username'].unique())
+    selected = st.selectbox("📂 Текущий срез данных:", ["СВОДНЫЙ ОТЧЕТ"] + list(ch_list))
+    df = df_all if selected == "СВОДНЫЙ ОТЧЕТ" else df_all[df_all['username'] == selected]
 
-    df = df_all if selected == "ВСЕ КАНАЛЫ" else df_all[df_all['username'] == selected]
+    # Аналитика
+    st.markdown("### 📊 Аналитический дашборд")
+    c1, c2 = st.columns(2)
 
-    # Метрики за ВЕСЬ период в базе
-    m = st.columns(4)
-    m[0].metric("Всего сообщений", len(df))
-    m[1].metric("Общие просмотры", f"{df['views'].sum():,}")
-    m[2].metric("Сумма реакций", f"{df['reactions'].sum():,}")
-    m[3].metric("Пересылки", f"{df['forwards'].sum():,}")
+    with c1:
+        counts = df['cluster'].value_counts().reset_index()
+        counts.columns = ['Тема', 'Кол-во']
+        fig = px.pie(counts, values='Кол-во', names='Тема', hole=.5, title="Структура контента")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with c2:
+        ng = processor.get_top_ngram_counts(df['text'])
+        if not ng.empty:
+            fig_bar = px.bar(ng, x='count', y='phrase', orientation='h', title="Ключевые слова и фразы")
+            st.plotly_chart(fig_bar, use_container_width=True)
 
     st.divider()
 
-    t1, t2, t3 = st.tabs(["📊 Тематика", "🔑 Ключевые слова", "📜 Лента"])
+    # Лента
+    st.markdown(f"### 📜 Интеллектуальная лента: {selected}")
 
-    with t1:
-        st.subheader("Кластеризация сообщений по темам")
-        if 'cluster' in df.columns:
-            st.bar_chart(df['cluster'].value_counts(), color="#0088CC")
+    # Кнопка скачивания
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Экспорт в CSV", csv, f"report_{selected}.csv", "text/csv")
 
-    with t2:
-        st.subheader("Топ-15 ключевых фраз (n-граммы)")
-        ng = processor.get_top_ngram_counts(df['text'])
-        if not ng.empty:
-            st.bar_chart(ng, x='phrase', y='count', color="#5865F2")
+    for _, row in df.sort_values(by='date', ascending=False).iterrows():
+        # Маппинг цветов для тем
+        color_map = {
+            "ВЛАСТЬ И ПОЛИТИКА": "#3498db", "ЭКОНОМИКА И ФИНАНСЫ": "#9b59b6",
+            "КРИМИНАЛ И ПРАВОСУДИЕ": "#e74c3c", "ПРОИСШЕСТВИЯ И ЧП": "#e67e22",
+            "СЕЛЬСКОЕ ХОЗЯЙСТВО": "#f1c40f", "ПОГОДА": "#1abc9c", "СПОРТ": "#2ecc71",
+            "ЖКХ И БЛАГОУСТРОЙСТВО": "#34495e", "ОБЩЕСТВО": "#7f8c8d"
+        }
+        bg_color = color_map.get(row['cluster'], "#95a5a6")
 
-    with t3:
-        st.subheader("Собранные сообщения и метрики")
-        # Показываем таблицу с просмотры, репосты (forwards), реакции
-        st.dataframe(
-            df[['date', 'cluster', 'text', 'views', 'forwards', 'reactions']].sort_values(by='date', ascending=False),
-            use_container_width=True, hide_index=True
-        )
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Экспорт отчета (CSV)", csv, "report.csv")
+        st.markdown(f"""
+            <div class="post-card">
+                <div style="display: flex; justify-content: space-between;">
+                    <span class="badge" style="background-color: {bg_color};">{row['cluster']}</span>
+                    <span style="opacity: 0.5; font-size: 0.8rem;">{row['date']}</span>
+                </div>
+                <div style="margin-top: 12px; font-size: 1.05rem; line-height: 1.6;">{row['text']}</div>
+                <div style="margin-top: 15px; display: flex; gap: 20px; font-size: 0.85rem; opacity: 0.6;">
+                    <span>👁 {row['views']}</span>
+                    <span>🔄 {row['forwards']}</span>
+                    <span>❤️ {row['reactions']}</span>
+                    <span style="color: #0088CC;">@{row['username']}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
