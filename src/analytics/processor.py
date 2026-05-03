@@ -16,9 +16,10 @@ stop_words = stopwords.words('russian')
 
 class TextProcessor:
     def __init__(self):
-        print("--- [SYSTEM] Инициализация нейросети... ---")
+        print("--- [SYSTEM] Инициализация нейросетевого ядра... ---")
         device = 0 if torch.cuda.is_available() else -1
         try:
+            # Используем модель для Zero-Shot классификации
             self.classifier = pipeline(
                 "zero-shot-classification",
                 model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
@@ -29,93 +30,89 @@ class TextProcessor:
             self.classifier = None
             print(f"--- [ERROR] ИИ не загружен: {e} ---")
 
-        # СОКРАЩЕННЫЙ СПИСОК (Для скорости и точности)
+        # Уточненный список категорий для нейросети
         self.labels = [
-            "Политика",
-            "Экономика",
-            "Криминал",
+            "Власть и Политика",
+            "Экономика и Финансы",
+            "Криминал и Правосудие",
             "Происшествия и ЧП",
             "Спорт",
-            "Образование",
+            "Образование и Наука",
             "Сельское хозяйство",
-            "Культура",
-            "Погода"
+            "Погода",
+            "Культура и Искусство",
+            "Здравоохранение",
+            "Технологии и IT"
         ]
 
-        # УСИЛЕННЫЙ СЛОВАРЬ (Чтобы ловить Образование и Пожары мгновенно)
-        self.fast_rules = {
-            "ПОГОДА": ["погода", "прогноз", "температура", "градус", "осадки", "белгидромет"],
-            "ОБРАЗОВАНИЕ": ["вуз", "студент", "абитуриент", "школа", "экзамен", "бюджетных мест", "обучение",
-                            "университет"],
-            "ПРОИСШЕСТВИЯ И ЧП": ["пожар", "мчс", "спасатели", "возгорание", "дтп", "авария", "ликвидировали"],
-            "СЕЛЬСКОЕ ХОЗЯЙСТВО": ["свиновод", "аграрный", "посевная", "фермер", "сельхоз"],
-            "КРИМИНАЛ": ["похитил", "украл", "мошенник", "задержан", "розыск", "кража", "миллиция"],
-            "СПОРТ": ["матч", "чемпионат", "фитнес", "бодибилдинг", "турнир"]
-        }
-
-    def clean_full(self, text):
+    def clean_extract_essence(self, text):
+        """Очистка текста: убираем шум, чтобы ИИ видел только суть"""
         if not text: return ""
-        # Отрезаем ссылки и мусор
+        # 1. Отрезаем ссылки и социальные сети
         text = re.split(r'Подробности|Подробнее|❤️|\[Inst\]|\[TikTok\]|http|💬|#|t.me', text)[0]
+        # 2. Убираем спецсимволы, оставляя знаки препинания для контекста
         text = re.sub(r'[^\w\s\.\,\!\?\-]', '', text)
+        # 3. Убираем лишние пробелы
         text = " ".join(text.split())
-        return text
-
-    def _fast_check(self, text):
-        text_lower = text.lower()
-        for label, keywords in self.fast_rules.items():
-            if any(word in text_lower for word in keywords):
-                return label
-        return None
+        return text.strip()
 
     def cluster_messages(self, df):
+        """Классификация сообщений исключительно средствами ИИ"""
         if df is None or df.empty: return df
         df_result = df.copy()
 
-        print(f"\n=== АНАЛИЗ {len(df)} СООБЩЕНИЙ ===")
+        # Шаблон гипотезы для повышения точности
+        hypothesis = "Эта новость посвящена теме {}."
+
+        print(f"\n--- [AI] Начинаю анализ {len(df)} сообщений ---")
 
         for index, row in df_result.iterrows():
             raw_text = row.get('text', '')
-            cleaned = self.clean_full(raw_text)
+            cleaned = self.clean_extract_essence(raw_text)
 
-            # 1. Быстрый фильтр (Словарь)
-            theme = self._fast_check(cleaned)
+            if len(cleaned) < 15:
+                df_result.at[index, 'cluster'] = "ОБЩЕСТВО"
+                continue
 
-            if theme:
-                print(f"-> [СЛОВАРЬ] {cleaned[:50]}... => {theme}")
-
-            # 2. Нейросеть (если словарь молчит)
-            if not theme and self.classifier:
+            if self.classifier:
                 try:
-                    # Берем только первые 150 символов для супер-скорости
-                    res = self.classifier(cleaned[:150], self.labels, multi_label=False)
+                    # Подаем в ИИ только смысловое ядро (первые 200 символов)
+                    # Это в разы ускоряет работу без потери точности
+                    res = self.classifier(
+                        cleaned[:200],
+                        self.labels,
+                        multi_label=False,
+                        hypothesis_template=hypothesis
+                    )
 
                     label = res['labels'][0].upper()
                     score = res['scores'][0]
 
-                    # Пишем отладку в консоль PyCharm
-                    print(f"-> [ИИ {score:.2f}] {cleaned[:50]}... => {label}")
-
-                    # Убираем жесткий порог, чтобы не всё шло в ОБЩЕСТВО
-                    if score > 0.25:
+                    # Логика: если ИИ уверен более чем на 30%, ставим тему
+                    if score > 0.30:
                         theme = label
                     else:
                         theme = "ОБЩЕСТВО"
+
+                    print(f"-> [CONF: {score:.2f}] {cleaned[:40]}... => {theme}")
+
                 except Exception as e:
+                    print(f"Ошибка классификации: {e}")
                     theme = "НОВОСТИ"
-            elif not theme:
-                theme = "ОБЩЕСТВО"
+            else:
+                theme = "БЕЗ АНАЛИЗА"
 
             df_result.at[index, 'cluster'] = theme
 
-        print("=== АНАЛИЗ ЗАВЕРШЕН ===\n")
+        print("--- [AI] Анализ завершен ---\n")
         return df_result
 
     def get_top_ngram_counts(self, texts, n=15):
+        """Статистический анализ частотности слов"""
         if texts is None or len(texts) == 0: return pd.DataFrame()
         try:
             def simple_clean(t):
-                t = self.clean_full(t).lower()
+                t = t.lower()
                 t = re.sub(r'[^а-яёa-z\s]', ' ', t)
                 return " ".join(t.split())
 
