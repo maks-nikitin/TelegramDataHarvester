@@ -73,11 +73,11 @@ def sync_data(username, start_date):
 
 # SIDEBAR
 with st.sidebar:
-    st.title("🧠 Intellect UI")
+    st.title("Intellect UI")
     target = st.text_input("Источник (@username)", placeholder="news_channel")
     date_val = st.date_input("Начало периода", datetime.date.today() - datetime.timedelta(days=3))
 
-    if st.button("🚀 Синхронизировать"):
+    if st.button("Синхронизировать"):
         if target:
             target = target.split('/')[-1].replace('@', '')
             with st.spinner('Интеллектуальная обработка...'):
@@ -95,14 +95,14 @@ with st.sidebar:
 df_all = db.get_messages_df()
 
 if df_all.empty:
-    st.info("👋 Система готова. Добавьте объект мониторинга в левой панели.")
+    st.info("Система готова. Добавьте объект мониторинга в левой панели.")
 else:
     ch_list = sorted(df_all['username'].unique())
-    selected = st.selectbox("📂 Текущий срез данных:", ["СВОДНЫЙ ОТЧЕТ"] + list(ch_list))
+    selected = st.selectbox("Текущий срез данных:", ["СВОДНЫЙ ОТЧЕТ"] + list(ch_list))
     df = df_all if selected == "СВОДНЫЙ ОТЧЕТ" else df_all[df_all['username'] == selected]
 
     # Аналитика
-    st.markdown("### 📊 Аналитический дашборд")
+    st.markdown("### Аналитический дашборд")
     c1, c2 = st.columns(2)
 
     with c1:
@@ -120,11 +120,11 @@ else:
     st.divider()
 
     # Лента
-    st.markdown(f"### 📜 Интеллектуальная лента: {selected}")
+    st.markdown(f"### Интеллектуальная лента: {selected}")
 
     # Кнопка скачивания
     csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Экспорт в CSV", csv, f"report_{selected}.csv", "text/csv")
+    st.download_button("Экспорт в CSV", csv, f"report_{selected}.csv", "text/csv")
 
     for _, row in df.sort_values(by='date', ascending=False).iterrows():
         # Маппинг цветов для тем
