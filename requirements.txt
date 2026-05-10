@@ -1,11 +1,23 @@
+# Работа с Telegram API (MTProto)
 telethon
+
+# Интерфейс и веб-сервер
 streamlit
 streamlit-autorefresh
+
+# Анализ данных и математика
 pandas
 scikit-learn
-nltk
+plotly
+
+# Машинное обучение и Нейросеть (NLP)
 torch
 torchvision
 transformers
+sentencepiece
+protobuf
+nltk
+
+# Системные утилиты
 python-dotenv
 apscheduler
