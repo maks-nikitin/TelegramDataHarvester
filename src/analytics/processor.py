@@ -5,6 +5,8 @@ import nltk
 from nltk.corpus import stopwords
 import torch
 from transformers import pipeline
+import json
+import os
 
 try:
     nltk.download('stopwords', quiet=True)
@@ -16,6 +18,19 @@ stop_words = stopwords.words('russian')
 
 class TextProcessor:
     def __init__(self):
+        # --- [НОВОЕ] Загрузка категорий из файла ---
+        config_path = os.path.join(os.path.dirname(__file__), '../../config/categories.json')
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+                # Берем ключи (названия тем) для ИИ
+                self.labels = [k.title() for k in config_data['categories'].keys() if k != "ОБЩЕСТВО"]
+                self.default_label = config_data.get('default_category', "ОБЩЕСТВО")
+        except Exception as e:
+            print(f"--- [WARNING] Не удалось загрузить категории: {e}. Использую дефолтные. ---")
+            self.labels = ["Спорт", "Политика", "Экономика"]  # Фолбэк
+            self.default_label = "ОБЩЕСТВО"
+
         print("--- [SYSTEM] Инициализация нейросетевого ядра... ---")
         device = 0 if torch.cuda.is_available() else -1
         try:
@@ -48,8 +63,15 @@ class TextProcessor:
     def clean_extract_essence(self, text):
         """Очистка текста: убираем шум, чтобы ИИ видел только суть"""
         if not text: return ""
-        # 1. Отрезаем ссылки и социальные сети
-        text = re.split(r'Подробности|Подробнее|❤️|\[Inst\]|\[TikTok\]|http|💬|#|t.me', text)[0]
+
+        # Сначала аккуратно удаляем явные URL, чтобы не ломать структуру текста
+        text = re.sub(r'https?://\S+|www\.\S+', '', text)
+
+        # 1. Отрезаем "хвосты" с призывами к действию и ссылками
+        parts = re.split(r'Подробности|Подробнее|❤️|\[Inst\]|\[TikTok\]|💬|#|t.me', text)
+        # Если после отрезания текст остался нормальной длины - берем его, иначе исходный (без ссылок)
+        text = parts[0] if len(parts[0].strip()) > 15 else text
+
         # 2. Убираем спецсимволы, оставляя знаки препинания для контекста
         text = re.sub(r'[^\w\s\.\,\!\?\-]', '', text)
         # 3. Убираем лишние пробелы
@@ -71,13 +93,12 @@ class TextProcessor:
             cleaned = self.clean_extract_essence(raw_text)
 
             if len(cleaned) < 15:
-                df_result.at[index, 'cluster'] = "ОБЩЕСТВО"
+                df_result.at[index, 'cluster'] = self.default_label
                 continue
 
             if self.classifier:
                 try:
                     # Подаем в ИИ только смысловое ядро (первые 200 символов)
-                    # Это в разы ускоряет работу без потери точности
                     res = self.classifier(
                         cleaned[:200],
                         self.labels,
@@ -108,18 +129,78 @@ class TextProcessor:
         return df_result
 
     def get_top_ngram_counts(self, texts, n=15):
-        """Статистический анализ частотности слов"""
+        """Продвинутый анализ частотности слов с лемматизацией и фильтрацией мусора"""
         if texts is None or len(texts) == 0: return pd.DataFrame()
         try:
-            def simple_clean(t):
-                t = t.lower()
-                t = re.sub(r'[^а-яёa-z\s]', ' ', t)
-                return " ".join(t.split())
+            # Инициализируем лемматизатор русского языка
+            try:
+                import pymorphy3 as pm
+                morph = pm.MorphAnalyzer()
+            except ImportError:
+                morph = None
+                print("--- [WARNING] pymorphy3 не установлен! Лемматизация отключена. ---")
 
-            cleaned = texts.apply(simple_clean)
-            vectorizer = CountVectorizer(stop_words=stop_words, ngram_range=(1, 2), max_features=n)
+            # Расширенный список мусорных слов (Telegram-специфика и общие слова-паразиты)
+            tg_web_stopwords = {
+                'https', 'http', 'www', 'com', 'ru', 'org', 'by', 'net', 'me', 'tg', 'co',
+                'telegram', 'channel', 'подписывайтесь', 'канал', 'читать', 'подробности',
+                'это', 'всё', 'который', 'свой', 'наш', 'ваш', 'его', 'ее', 'их', 'также',
+                'быть', 'мочь', 'очень', 'новость', 'сообщение', 'фото', 'видео', 'пост',
+                'самый', 'главный', 'город', 'область', 'район', 'беларусь', 'россия',
+                'grodno', 'minsk', 'grodnonews', 'news'  # Локальные мусорные слова из ссылок
+            }
+            extended_stop_words = set(stop_words).union(tg_web_stopwords)
+
+            def advanced_clean_and_lemmatize(t):
+                if not isinstance(t, str): return ""
+
+                # 1. К нижнему регистру
+                t = t.lower()
+
+                # 2. Полностью удаляем ссылки, юзернеймы и хэштеги
+                t = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', t)
+                t = re.sub(r'[@#]\w+', ' ', t)
+                # Удаляем почты и домены вроде "grodnonews.by"
+                t = re.sub(r'\b\w+\.(by|ru|com|org|net|me|info)\b', ' ', t)
+
+                # 3. Оставляем только буквы
+                t = re.sub(r'[^а-яёa-z\s]', ' ', t)
+
+                words = t.split()
+                processed_words = []
+
+                for word in words:
+                    # Игнорируем слишком короткие слова (< 3 букв)
+                    if len(word) < 3:
+                        continue
+
+                    # Приводим к начальной форме (лемматизируем)
+                    if morph:
+                        lemma = morph.parse(word)[0].normal_form
+                    else:
+                        lemma = word
+
+                    # Проверяем на стоп-слова
+                    if lemma not in extended_stop_words:
+                        processed_words.append(lemma)
+
+                return " ".join(processed_words)
+
+            cleaned = texts.apply(advanced_clean_and_lemmatize)
+
+            # Настраиваем векторизатор на поиск слов и словосочетаний (1 и 2 слова)
+            vectorizer = CountVectorizer(ngram_range=(1, 2), max_features=n)
             X = vectorizer.fit_transform(cleaned)
-            return pd.DataFrame({'phrase': vectorizer.get_feature_names_out(), 'count': X.sum(axis=0).A1}).sort_values(
-                by='count', ascending=False)
-        except:
+
+            # Если после жесткой очистки ничего не осталось
+            if X.shape[1] == 0:
+                return pd.DataFrame()
+
+            return pd.DataFrame({
+                'phrase': vectorizer.get_feature_names_out(),
+                'count': X.sum(axis=0).A1
+            }).sort_values(by='count', ascending=False)
+
+        except Exception as e:
+            print(f"Ошибка n-грамм: {e}")
             return pd.DataFrame()

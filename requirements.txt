@@ -7,6 +7,7 @@ streamlit-autorefresh
 
 # Анализ данных и математика
 pandas
+numpy
 scikit-learn
 plotly
 
@@ -17,6 +18,10 @@ transformers
 sentencepiece
 protobuf
 nltk
+pymorphy3
+
+# Генерация отчетов (PDF)
+fpdf2
 
 # Системные утилиты
 python-dotenv

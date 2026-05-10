@@ -5,12 +5,14 @@ import asyncio
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import json
 
 # Фикс путей
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(project_root)
 
+from src.analytics.report_generator import PDFReport
 from src.database.db_manager import DBManager
 from src.analytics.processor import TextProcessor
 from src.parser.collector import TelegramCollector
@@ -19,6 +21,9 @@ from src.parser.collector import TelegramCollector
 db = DBManager()
 collector = TelegramCollector()
 
+config_path = "config/categories.json"
+with open(config_path, 'r', encoding='utf-8') as f:
+    CONFIG = json.load(f)
 
 @st.cache_resource
 def get_processor():
@@ -52,11 +57,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def sync_data(username, start_date):
+def sync_data(username, start_date, end_date): # Добавили end_date
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        raw = loop.run_until_complete(collector.fetch_messages(username, start_date=start_date, limit=100))
+        # Увеличили лимит до 500 для надежности
+        raw = loop.run_until_complete(collector.fetch_messages(
+            username,
+            start_date=start_date,
+            end_date=end_date,
+            limit=500
+        ))
         if raw:
             ids = db.get_existing_msg_ids(username)
             new_msgs = [m for m in raw if m.get('tg_msg_id') not in ids]
@@ -75,19 +86,34 @@ def sync_data(username, start_date):
 with st.sidebar:
     st.title("Intellect UI")
     target = st.text_input("Источник (@username)", placeholder="news_channel")
-    date_val = st.date_input("Начало периода", datetime.date.today() - datetime.timedelta(days=3))
 
-    if st.button("Синхронизировать"):
-        if target:
-            target = target.split('/')[-1].replace('@', '')
-            with st.spinner('Интеллектуальная обработка...'):
-                db.add_channel(target)
-                count = sync_data(target, date_val)
-                st.success(f"Добавлено постов: {count}")
-                st.rerun()
+    st.write("---")
+    st.write(" **Период анализа**")
 
-    st.markdown("---")
-    if st.button("🗑 Очистить базу"):
+    # Разделяем на две колонки, чтобы было компактно и открывалось вниз
+    col1, col2 = st.columns(2)
+    with col1:
+        d_start = st.date_input("Начало", datetime.date.today() - datetime.timedelta(days=7))
+    with col2:
+        d_end = st.date_input("Конец", datetime.date.today())
+
+    # Проверка логики дат
+    if d_start > d_end:
+        st.error("Ошибка: Дата начала позже даты конца")
+    else:
+        if st.button("Синхронизировать", use_container_width=True):
+            if target:
+                target_clean = target.split('/')[-1].replace('@', '')
+                with st.spinner('Парсинг и ИИ анализ...'):
+                    db.add_channel(target_clean)
+                    count = sync_data(target_clean, d_start, d_end)
+                    st.success(f"Готово! Добавлено: {count}")
+                    st.rerun()
+            else:
+                st.warning("Введите @username")
+
+    st.write("---")
+    if st.button("🗑 Очистить базу", use_container_width=True):
         db.clear_all_data()
         st.rerun()
 
@@ -122,19 +148,32 @@ else:
     # Лента
     st.markdown(f"### Интеллектуальная лента: {selected}")
 
-    # Кнопка скачивания
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Экспорт в CSV", csv, f"report_{selected}.csv", "text/csv")
+    c_exp1, c_exp2 = st.columns(2)
+
+    with c_exp1:
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(" Экспорт в CSV", csv, f"report_{selected}.csv", "text/csv", use_container_width=True)
+
+    with c_exp2:
+        if st.button(" Сформировать PDF-отчет", use_container_width=True):
+            # 1. Сначала получаем ключевые слова для текущего среза
+            kw_df = processor.get_top_ngram_counts(df['text'])
+
+            # 2. Генерируем PDF
+            with st.spinner("Создание документа..."):
+                report_gen = PDFReport()
+                pdf_bytes = report_gen.generate(df, kw_df, selected)
+
+                st.download_button(
+                    label=" Скачать PDF",
+                    data=bytes(pdf_bytes),
+                    file_name=f"report_{selected}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
 
     for _, row in df.sort_values(by='date', ascending=False).iterrows():
-        # Маппинг цветов для тем
-        color_map = {
-            "ВЛАСТЬ И ПОЛИТИКА": "#3498db", "ЭКОНОМИКА И ФИНАНСЫ": "#9b59b6",
-            "КРИМИНАЛ И ПРАВОСУДИЕ": "#e74c3c", "ПРОИСШЕСТВИЯ И ЧП": "#e67e22",
-            "СЕЛЬСКОЕ ХОЗЯЙСТВО": "#f1c40f", "ПОГОДА": "#1abc9c", "СПОРТ": "#2ecc71",
-            "ЖКХ И БЛАГОУСТРОЙСТВО": "#34495e", "ОБЩЕСТВО": "#7f8c8d"
-        }
-        bg_color = color_map.get(row['cluster'], "#95a5a6")
+        bg_color = CONFIG['categories'].get(row['cluster'], "#95a5a6")
 
         st.markdown(f"""
             <div class="post-card">
