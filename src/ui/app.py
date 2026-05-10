@@ -7,24 +7,26 @@ import pandas as pd
 import plotly.express as px
 import json
 
-# Фикс путей
+# --- НАСТРОЙКА ПУТЕЙ ---
+# Добавляем корень проекта в системные пути Python, чтобы модули из папки src
+# могли "видеть" друг друга независимо от того, откуда запущен скрипт.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(project_root)
 
-from src.analytics.report_generator import PDFReport
+# Импортируем наши собственные модули
 from src.database.db_manager import DBManager
 from src.analytics.processor import TextProcessor
 from src.parser.collector import TelegramCollector
+from src.analytics.report_generator import PDFReport
 
-# Инициализация
+# --- ИНИЦИАЛИЗАЦИЯ ОБЪЕКТОВ ---
 db = DBManager()
 collector = TelegramCollector()
 
-config_path = "config/categories.json"
-with open(config_path, 'r', encoding='utf-8') as f:
-    CONFIG = json.load(f)
 
+# Используем декоратор @st.cache_resource, чтобы тяжелая нейросеть загрузилась
+# в память только один раз при старте, а не при каждом обновлении страницы.
 @st.cache_resource
 def get_processor():
     return TextProcessor()
@@ -32,9 +34,15 @@ def get_processor():
 
 processor = get_processor()
 
-# Настройки UI
+# Загружаем конфигурацию категорий для синхронизации цветов в UI
+config_path = os.path.join(project_root, "config/categories.json")
+with open(config_path, 'r', encoding='utf-8') as f:
+    CONFIG = json.load(f)
+
+# --- НАСТРОЙКИ СТРАНИЦЫ ---
 st.set_page_config(page_title="TG Intellect Monitor", page_icon="🧠", layout="wide")
 
+# Внедрение кастомного CSS для создания красивых карточек постов и бейджей
 st.markdown("""
     <style>
     .post-card {
@@ -51,29 +59,36 @@ st.markdown("""
         font-weight: bold;
         color: white;
     }
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
+    header {visibility: hidden;} /* Убираем лишние элементы Streamlit */
     </style>
 """, unsafe_allow_html=True)
 
 
-def sync_data(username, start_date, end_date): # Добавили end_date
+# --- ЛОГИКА СИНХРОНИЗАЦИИ ---
+def sync_data(username, start_date, end_date):
+    """
+    Функция-мостик. Запускает асинхронный парсер внутри синхронного Streamlit,
+    прогоняет посты через ИИ и сохраняет результат в базу.
+    """
+    # Создаем новый цикл событий для асинхронного Telethon
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        # Увеличили лимит до 500 для надежности
+        # 1. Собираем сырые данные из Telegram
         raw = loop.run_until_complete(collector.fetch_messages(
-            username,
-            start_date=start_date,
-            end_date=end_date,
-            limit=500
+            username, start_date=start_date, end_date=end_date, limit=500
         ))
+
         if raw:
-            ids = db.get_existing_msg_ids(username)
-            new_msgs = [m for m in raw if m.get('tg_msg_id') not in ids]
+            # 2. Проверяем, каких постов еще нет в нашей базе (защита от дублей)
+            existing_ids = db.get_existing_msg_ids(username)
+            new_msgs = [m for m in raw if m.get('tg_msg_id') not in existing_ids]
+
             if new_msgs:
                 df_new = pd.DataFrame(new_msgs)
+                # 3. Интеллектуальный анализ: нейросеть определяет темы
                 df_new = processor.cluster_messages(df_new)
+                # 4. Сохраняем в SQLite
                 df_new['date'] = df_new['date'].astype(str)
                 db.save_messages(username, df_new.to_dict('records'))
                 return len(new_msgs)
@@ -82,103 +97,98 @@ def sync_data(username, start_date, end_date): # Добавили end_date
         loop.close()
 
 
-# SIDEBAR
+# --- БОКОВАЯ ПАНЕЛЬ (SIDEBAR) ---
 with st.sidebar:
     st.title("Intellect UI")
     target = st.text_input("Источник (@username)", placeholder="news_channel")
 
     st.write("---")
     st.write(" **Период анализа**")
-
-    # Разделяем на две колонки, чтобы было компактно и открывалось вниз
-    col1, col2 = st.columns(2)
-    with col1:
+    # Раздельный ввод дат для стабильного отображения в узком сайдбаре
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
         d_start = st.date_input("Начало", datetime.date.today() - datetime.timedelta(days=7))
-    with col2:
+    with col_d2:
         d_end = st.date_input("Конец", datetime.date.today())
 
-    # Проверка логики дат
+    # Логика кнопки синхронизации
     if d_start > d_end:
-        st.error("Ошибка: Дата начала позже даты конца")
+        st.error("Дата начала позже даты конца")
     else:
         if st.button("Синхронизировать", use_container_width=True):
             if target:
-                target_clean = target.split('/')[-1].replace('@', '')
+                # Очищаем юзернейм от лишних символов (@ или ссылки)
+                clean_target = target.split('/')[-1].replace('@', '')
                 with st.spinner('Парсинг и ИИ анализ...'):
-                    db.add_channel(target_clean)
-                    count = sync_data(target_clean, d_start, d_end)
-                    st.success(f"Готово! Добавлено: {count}")
-                    st.rerun()
-            else:
-                st.warning("Введите @username")
+                    db.add_channel(clean_target)
+                    count = sync_data(clean_target, d_start, d_end)
+                    st.success(f"Добавлено: {count}")
+                    st.rerun()  # Обновляем страницу, чтобы увидеть данные
 
     st.write("---")
     if st.button("🗑 Очистить базу", use_container_width=True):
         db.clear_all_data()
         st.rerun()
 
-# MAIN
+# --- ОСНОВНАЯ ОБЛАСТЬ ---
 df_all = db.get_messages_df()
 
 if df_all.empty:
-    st.info("Система готова. Добавьте объект мониторинга в левой панели.")
+    st.info("Система готова. Введите название канала в левой панели для начала анализа.")
 else:
-    ch_list = sorted(df_all['username'].unique())
-    selected = st.selectbox("Текущий срез данных:", ["СВОДНЫЙ ОТЧЕТ"] + list(ch_list))
+    # Выбор конкретного канала для фильтрации данных
+    channels = sorted(df_all['username'].unique())
+    selected = st.selectbox("Текущий срез данных:", ["СВОДНЫЙ ОТЧЕТ"] + list(channels))
     df = df_all if selected == "СВОДНЫЙ ОТЧЕТ" else df_all[df_all['username'] == selected]
 
-    # Аналитика
+    # --- ВИЗУАЛИЗАЦИЯ (ДАШБОРД) ---
     st.markdown("### Аналитический дашборд")
     c1, c2 = st.columns(2)
 
     with c1:
-        counts = df['cluster'].value_counts().reset_index()
-        counts.columns = ['Тема', 'Кол-во']
-        fig = px.pie(counts, values='Кол-во', names='Тема', hole=.5, title="Структура контента")
+        # Круговая диаграмма распределения постов по темам
+        theme_counts = df['cluster'].value_counts().reset_index()
+        theme_counts.columns = ['Тема', 'Кол-во']
+        fig = px.pie(theme_counts, values='Кол-во', names='Тема', hole=.5, title="Структура контента")
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
-        ng = processor.get_top_ngram_counts(df['text'])
-        if not ng.empty:
-            fig_bar = px.bar(ng, x='count', y='phrase', orientation='h', title="Ключевые слова и фразы")
+        # Столбчатая диаграмма частотности ключевых фраз (NLP анализ)
+        kw_df = processor.get_top_ngram_counts(df['text'])
+        if not kw_df.empty:
+            fig_bar = px.bar(kw_df.head(15), x='count', y='phrase', orientation='h', title="Ключевые слова и фразы")
+            fig_bar.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig_bar, use_container_width=True)
 
     st.divider()
 
-    # Лента
+    # --- ЭКСПОРТ И ЛЕНТА ---
     st.markdown(f"### Интеллектуальная лента: {selected}")
 
-    c_exp1, c_exp2 = st.columns(2)
+    # Кнопки выгрузки результатов
+    exp_col1, exp_col2 = st.columns(2)
+    with exp_col1:
+        csv_data = df.to_csv(index=False).encode('utf-8')
+        st.download_button(" Экспорт в CSV", csv_data, f"report_{selected}.csv", "text/csv", use_container_width=True)
 
-    with c_exp1:
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(" Экспорт в CSV", csv, f"report_{selected}.csv", "text/csv", use_container_width=True)
-
-    with c_exp2:
+    with exp_col2:
         if st.button(" Сформировать PDF-отчет", use_container_width=True):
-            # 1. Сначала получаем ключевые слова для текущего среза
-            kw_df = processor.get_top_ngram_counts(df['text'])
-
-            # 2. Генерируем PDF
-            with st.spinner("Создание документа..."):
+            with st.spinner("Генерация документа..."):
+                # Собираем PDF, передавая данные и ключевые слова
                 report_gen = PDFReport()
                 pdf_bytes = report_gen.generate(df, kw_df, selected)
+                st.download_button(" Скачать PDF", data=bytes(pdf_bytes), file_name=f"report_{selected}.pdf",
+                                   use_container_width=True)
 
-                st.download_button(
-                    label=" Скачать PDF",
-                    data=bytes(pdf_bytes),
-                    file_name=f"report_{selected}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-
+    # Отрисовка ленты сообщений в виде карточек
     for _, row in df.sort_values(by='date', ascending=False).iterrows():
-        bg_color = CONFIG['categories'].get(row['cluster'], "#95a5a6")
+        # Динамически подбираем цвет бейджа из конфига
+        cat_color = CONFIG['categories'].get(row['cluster'], "#95a5a6")
 
         st.markdown(f"""
             <div class="post-card">
                 <div style="display: flex; justify-content: space-between;">
-                    <span class="badge" style="background-color: {bg_color};">{row['cluster']}</span>
+                    <span class="badge" style="background-color: {cat_color};">{row['cluster']}</span>
                     <span style="opacity: 0.5; font-size: 0.8rem;">{row['date']}</span>
                 </div>
                 <div style="margin-top: 12px; font-size: 1.05rem; line-height: 1.6;">{row['text']}</div>
