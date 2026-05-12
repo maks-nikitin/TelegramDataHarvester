@@ -1,3 +1,6 @@
+import time
+import traceback
+import asyncio
 from sklearn.feature_extraction.text import CountVectorizer
 import pandas as pd
 import re
@@ -59,25 +62,53 @@ class TextProcessor:
         return " ".join(text.split()).strip()
 
     def cluster_messages(self, df):
-        """Процесс присвоения категорий постам с помощью ИИ"""
+        """Классификация сообщений с подробным выводом в консоль"""
+        import time  # Добавь импорт в начало файла или здесь
+
         if df is None or df.empty: return df
         df_result = df.copy()
         hypothesis = "Эта новость посвящена теме {}."
 
+        print(f"\n{'-' * 30}")
+        print(f"[AI ANALYZER] Начинаю классификацию {len(df)} новых постов...")
+        print(f"{'-' * 30}")
+
+        total_ai_start = time.time()
+
         for index, row in df_result.iterrows():
+            post_start = time.time()
+            text_snippet = row.get('text', '')[:50].replace('\n', ' ')
             cleaned = self.clean_extract_essence(row.get('text', ''))
+
             if len(cleaned) < 15:
                 df_result.at[index, 'cluster'] = self.default_label
+                print(f"Пост {index + 1}: Слишком короткий -> {self.default_label}")
                 continue
 
             if self.classifier:
                 try:
+                    # Сама работа нейросети
                     res = self.classifier(cleaned[:200], self.labels, multi_label=False, hypothesis_template=hypothesis)
                     label = res['labels'][0].upper()
-                    score = res['scores'][0]
+                    score = res['scores'][0]  # Тот самый коэффициент уверенности
+
                     df_result.at[index, 'cluster'] = label if score > 0.30 else self.default_label
-                except:
+
+                    duration = time.time() - post_start
+                    # Красивый вывод в консоль
+                    print(f"Пост {index + 1}: [{text_snippet}...]")
+                    print(f"Тема: {label} | Уверенность: {score:.4f} | Время: {duration:.2f} сек")
+                except Exception as e:
                     df_result.at[index, 'cluster'] = "НОВОСТИ"
+                    print(f"Пост {index + 1}: Ошибка анализа: {e}")
+            else:
+                df_result.at[index, 'cluster'] = "БЕЗ АНАЛИЗА"
+
+        total_duration = time.time() - total_ai_start
+        print(f"{'-' * 30}")
+        print(f"[AI FINISH] Обработка завершена за {total_duration:.2f} сек.")
+        print(f"{'-' * 30}\n")
+
         return df_result
 
     def get_top_ngram_counts(self, texts, n=15):

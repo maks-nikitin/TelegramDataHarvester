@@ -1,3 +1,6 @@
+import time
+import asyncio
+import traceback
 import sys
 import os
 import datetime
@@ -6,6 +9,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import json
+
 
 # --- НАСТРОЙКА ПУТЕЙ ---
 # Добавляем корень проекта в системные пути Python, чтобы модули из папки src
@@ -66,33 +70,60 @@ st.markdown("""
 
 # --- ЛОГИКА СИНХРОНИЗАЦИИ ---
 def sync_data(username, start_date, end_date):
-    """
-    Функция-мостик. Запускает асинхронный парсер внутри синхронного Streamlit,
-    прогоняет посты через ИИ и сохраняет результат в базу.
-    """
-    # Создаем новый цикл событий для асинхронного Telethon
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print(f"\n--- [DEBUG START] Попытка синхронизации @{username} ---")
+
     try:
-        # 1. Собираем сырые данные из Telegram
+        global_start = time.time()
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # 1. Парсинг
+        print(f"DEBUG: Вызов collector.fetch_messages с {start_date} по {end_date}...")
         raw = loop.run_until_complete(collector.fetch_messages(
             username, start_date=start_date, end_date=end_date, limit=500
         ))
 
-        if raw:
-            # 2. Проверяем, каких постов еще нет в нашей базе (защита от дублей)
-            existing_ids = db.get_existing_msg_ids(username)
-            new_msgs = [m for m in raw if m.get('tg_msg_id') not in existing_ids]
+        if raw is None:
+            print("DEBUG: Collector вернул None! Проверь подключение к Telegram.")
+            return 0
 
-            if new_msgs:
-                df_new = pd.DataFrame(new_msgs)
-                # 3. Интеллектуальный анализ: нейросеть определяет темы
-                df_new = processor.cluster_messages(df_new)
-                # 4. Сохраняем в SQLite
-                df_new['date'] = df_new['date'].astype(str)
-                db.save_messages(username, df_new.to_dict('records'))
-                return len(new_msgs)
-        return 0
+        print(f"DEBUG: Собрано сообщений из API: {len(raw)}")
+
+        if not raw:
+            print("DEBUG: За указанный период постов нет.")
+            return 0
+
+        # 2. Фильтрация дубликатов
+        print("DEBUG: Проверка существующих ID в базе...")
+        ids = db.get_existing_msg_ids(username)
+        new_msgs = [m for m in raw if m.get('tg_msg_id') not in ids]
+        print(f"DEBUG: Новых (которых нет в базе): {len(new_msgs)}")
+
+        if not new_msgs:
+            print("DEBUG: Синхронизация не требуется, всё уже в базе.")
+            return 0
+
+        # 3. Работа ИИ
+        print("DEBUG: Отправка в TextProcessor...")
+        df_new = pd.DataFrame(new_msgs)
+        df_new = processor.cluster_messages(df_new)
+
+        # 4. Сохранение
+        print("DEBUG: Сохранение в БД...")
+        df_new['date'] = df_new['date'].astype(str)
+        db.save_messages(username, df_new.to_dict('records'))
+
+        total_time = time.time() - global_start
+        print(f"--- [DEBUG SUCCESS] Завершено за {total_time:.2f} сек. Добавлено: {len(new_msgs)} ---")
+        return len(new_msgs)
+
+    except Exception as e:
+        print("\n❌❌❌ [CRITICAL ERROR IN SYNC_DATA] ❌❌❌")
+        # Эта команда выведет в консоль ПОЛНЫЙ путь ошибки (на какой строке и почему упало)
+        traceback.print_exc()
+        print("-------------------------------------------\n")
+        return -1
     finally:
         loop.close()
 
