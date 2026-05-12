@@ -1,28 +1,24 @@
-# Работа с Telegram API (MTProto)
+# --- Работа с Telegram API (MTProto) ---
 telethon
+python-dotenv
 
-# Интерфейс и веб-сервер
+# --- Интерфейс и Визуализация ---
 streamlit
-streamlit-autorefresh
-
-# Анализ данных и математика
-pandas
-numpy
-scikit-learn
 plotly
 
-# Машинное обучение и Нейросеть (NLP)
+# --- Обработка данных ---
+pandas
+numpy
+
+# --- Искусственный интеллект и NLP (Нейросети) ---
 torch
 torchvision
 transformers
 sentencepiece
 protobuf
 nltk
+scikit-learn
 pymorphy3
 
-# Генерация отчетов (PDF)
+# --- Генерация отчетов ---
 fpdf2
-
-# Системные утилиты
-python-dotenv
-apscheduler
