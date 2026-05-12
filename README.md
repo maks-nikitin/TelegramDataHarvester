@@ -1,22 +1,27 @@
-Installation and Setup
-!!!Important Notice
-Telegram Account Safety: It is highly recommended to use a secondary or non-essential phone number for this application. While Telegram does not ban users simply for using the MTProto library, your account may be restricted or banned for violating Telegram's Terms of Service (e.g., aggressive data harvesting, suspicious activity, or spam). Use this tool responsibly and at your own risk.
-Prerequisites: You must have a working Telegram account and the Telegram app installed on your phone/PC to receive the authorization code.
-1. Environment Preparation
-Clone the repository and install the required dependencies:
-2. API Access Configuration
--To interact with Telegram's servers, you need to obtain your own API credentials:
--Go to my.telegram.org and log in.
--Go to "API development tools" and create a new application.
--Copy your API_ID and API_HASH.
--Create a .env file in the root directory of the project and add your credentials:
-3. Account Authentication (First-time setup)
-Before launching the main application, you must create a session file. This step links the app to your Telegram account:
--Run the initialization script:
+Telegram Data Harvester
+Программа для автоматизированного сбора сообщений и метрик популярности (просмотры, реакции, репосты) из открытых Telegram-каналов с последующей интеллектуальной классификацией контента с помощью нейросетей.
+Требования
+Python 3.10+
+pip (менеджер пакетов Python)
+Установленное приложение Telegram (на смартфоне или ПК) для получения кода авторизации.
+!!!Важное предупреждение (Security Notice)
+Безопасность аккаунта: Настоятельно рекомендуется использовать второстепенный (не основной) номер телефона. Telegram может ограничить или заблокировать аккаунт за нарушение условий использования (агрессивный сбор данных, подозрительная активность). Используйте инструмент ответственно.
+Как запустить
+Клонируйте репозиторий:
+git clone https://github.com/maks-nikitin/TelegramDataHarvester.git
+cd TelegramDataHarvester
+Настройте доступ к API:
+Получите API_ID и API_HASH на сайте my.telegram.org.
+Создайте файл .env в корневой директории проекта и добавьте туда ваши данные:
+API_ID=ваш_id
+API_HASH=ваш_hash
+Установите зависимости:
+pip install -r requirements.txt
+Первичная авторизация (First-time setup):
+Перед запуском основного интерфейса необходимо создать файл сессии, привязав программу к вашему аккаунту:
+Запустите скрипт инициализации:
 python test_api.py
--In the console: Enter your phone number (including country code).
--In your Telegram app: You will receive a login code.
--In the console: Enter the received code.
-Once completed, a .session file will be created in the data/ folder, and you won't need to repeat this step again.
-4. Running the Application
+Введите ваш номер телефона в консоль.
+Введите полученный в Telegram код подтверждения.
+После завершения в папке data/ появится файл .session. Больше этот шаг выполнять не потребуется.
 streamlit run src/ui/app.py
